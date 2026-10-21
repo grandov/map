@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Домофоны — Нижний Новгород</title>
+<style>
+  :root{--ac:#2563eb;--bg:#fff;--tx:#0f172a;--mu:#64748b;--ln:#e2e8f0}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--tx)}
+  #map{position:fixed;inset:0}
+  .ui{position:fixed;z-index:10}
+  #search{top:calc(10px + env(safe-area-inset-top));left:10px;right:10px;max-width:460px;display:flex;background:var(--bg);border-radius:14px;box-shadow:0 2px 10px #0003;overflow:hidden}
+  #search input{flex:1;min-width:0;border:0;outline:0;font-size:16px;padding:14px;background:transparent}
+  #search button{border:0;background:var(--ac);color:#fff;font-size:15px;font-weight:600;padding:0 18px}
+  #fabs{right:10px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:10px}
+  .fab{width:46px;height:46px;border-radius:50%;border:0;background:var(--bg);box-shadow:0 2px 8px #0003;display:grid;place-items:center;color:var(--tx);padding:0}
+  .fab:active{transform:scale(.92)}
+  .fab svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+  #toast{top:calc(68px + env(safe-area-inset-top));left:50%;transform:translate(-50%,-8px);background:#0f172ae6;color:#fff;font-size:13px;padding:8px 14px;border-radius:20px;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;max-width:90%;text-align:center}
+  #toast.on{opacity:1;transform:translate(-50%,0)}
+  #sheet{left:0;right:0;bottom:0;background:var(--bg);border-radius:20px 20px 0 0;padding:10px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -4px 20px #0004;transform:translateY(105%);transition:transform .25s ease;max-width:520px;margin:0 auto}
+  #sheet.open{transform:none}
+  #sheet i{display:block;width:40px;height:4px;border-radius:2px;background:var(--ln);margin:0 auto 12px}
+  #addr{font-weight:700;font-size:17px;margin-bottom:10px}
+  #sheet label{font-size:12px;color:var(--mu)}
+  #sheet input{width:100%;font-size:20px;padding:11px 12px;margin:3px 0 10px;border:1.5px solid var(--ln);border-radius:10px;outline:0}
+  #sheet input:focus{border-color:var(--ac)}
+  .row{display:flex;gap:8px}
+  .row button{flex:1;padding:13px;font-size:16px;font-weight:600;border-radius:12px;border:0;background:#f1f5f9;color:var(--tx)}
+  .row .ok{flex:2;background:var(--ac);color:#fff}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<form id="search" class="ui"><input id="q" type="search" placeholder="Улица и дом, например Ларина 5" enterkeyhint="search"><button>Найти</button></form>
+<div id="fabs" class="ui">
+  <button class="fab" id="loc" title="Где я"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="7"/></svg></button>
+  <button class="fab" id="exp" title="Сохранить копию кодов"><svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5M5 21h14v-4"/></svg></button>
+  <button class="fab" id="imp" title="Загрузить копию кодов"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 17v4h14v-4"/></svg></button>
+  <button class="fab" id="keybtn" title="Ключ 2ГИС"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></svg></button>
+</div>
+<div id="toast" class="ui"></div>
+<div id="sheet" class="ui"><i></i><div id="addr"></div>
+  <label>Код домофона</label><input id="code" placeholder="например 1234К" autocomplete="off">
+  <label>Заметка</label><input id="note" placeholder="подъезд, этаж…" autocomplete="off">
+  <div class="row"><button id="del">Удалить</button><button id="cls">Закрыть</button><button id="ok" class="ok">Сохранить</button></div>
+</div>
+<input type="file" id="file" accept=".json" hidden>
+
+<script src="https://mapgl.2gis.com/api/js/v1"></script>
+<script>
+const $ = id => document.getElementById(id);
+const DK = 'nn_domofon_2gis_v1', KK = 'nn_2gis_key';
+let data = {}; try { data = JSON.parse(localStorage.getItem(DK) || '{}'); } catch (e) {}
+const saveData = () => localStorage.setItem(DK, JSON.stringify(data));
+let tt; function toast(t, ms = 2200){ const e = $('toast'); e.textContent = t; e.classList.add('on'); clearTimeout(tt); if (ms) tt = setTimeout(() => e.classList.remove('on'), ms); }
+
+function askKey(force){
+  let k = localStorage.getItem(KK);
+  if (!k || force) { k = (prompt('Вставьте API-ключ 2ГИС:', k || '') || '').trim(); if (k) localStorage.setItem(KK, k); }
+  return k;
+}
+const KEY = askKey(false);
+$('keybtn').onclick = () => { if (askKey(true)) location.reload(); };
+
+const map = new mapgl.Map('map', {center: [43.9965, 56.3175], zoom: 16.5, key: KEY || 'none', zoomControl: 'bottomLeft'});
+let marker = null, cur = null;
+const putMarker = (lon, lat) => { if (marker) marker.destroy(); marker = new mapgl.Marker(map, {coordinates: [lon, lat]}); };
+
+const API = 'https://catalog.api.2gis.com/3.0/items/geocode?fields=items.point&key=' + encodeURIComponent(KEY || '');
+async function geo(p){
+  const j = await (await fetch(API + p)).json();
+  if (j.meta && j.meta.error) throw new Error(j.meta.error.message || 'api');
+  return (j.result && j.result.items) || [];
+}
+
+const refresh = () => map.setSelectedObjects(Object.values(data).map(d => d.mapId).filter(Boolean));
+map.on('styleload', refresh); setTimeout(refresh, 1500);
+
+const closeSheet = () => $('sheet').classList.remove('open');
+function openSheet(c){
+  cur = c; const d = data[c.key] || {};
+  $('addr').textContent = c.addr; $('code').value = d.code || ''; $('note').value = d.note || '';
+  $('sheet').classList.add('open'); setTimeout(() => $('code').focus(), 260);
+}
+$('cls').onclick = closeSheet;
+$('ok').onclick = () => {
+  const code = $('code').value.trim(), note = $('note').value.trim();
+  if (code || note) data[cur.key] = {code, note, addr: cur.addr, mapId: cur.mapId || (data[cur.key] || {}).mapId}; else delete data[cur.key];
+  saveData(); refresh(); closeSheet(); toast('Сохранено', 1200);
+};
+$('del').onclick = () => { delete data[cur.key]; saveData(); refresh(); closeSheet(); };
+
+map.on('click', async e => {
+  if (!e.target) return closeSheet();
+  const mapId = e.target.id, [lng, lat] = e.lngLat;
+  toast('Определяю адрес…', 0);
+  try {
+    const it = (await geo(`&type=building&lon=${lng}&lat=${lat}`))[0];
+    $('toast').classList.remove('on');
+    openSheet(it ? {key: String(it.id), addr: it.address_name || it.full_name || it.name, mapId} : {key: 'm' + mapId, addr: 'Дом без адреса', mapId});
+  } catch (err) { openSheet({key: 'm' + mapId, addr: 'Дом (адрес не загрузился)', mapId}); toast('Не удалось получить адрес — проверьте Geocoder API у ключа', 3500); }
+});
+
+$('search').onsubmit = async e => {
+  e.preventDefault(); $('q').blur();
+  const raw = $('q').value.trim(); if (!raw) return;
+  toast('Ищу…', 0);
+  try {
+    const it = (await geo('&type=building&q=' + encodeURIComponent('Нижний Новгород, ' + raw)))[0];
+    if (!it || !it.point) {
+      const w = raw.toLowerCase().replace(/[.,]/g, ' ').split(/\s+/).filter(Boolean);
+      const loc = Object.entries(data).find(([k, d]) => w.every(x => (d.addr || '').toLowerCase().includes(x)));
+      if (loc) { openSheet({key: loc[0], addr: loc[1].addr}); return $('toast').classList.remove('on'); }
+      return toast('Адрес не найден. Пример: «Ларина 5»', 3000);
+    }
+    map.setCenter([it.point.lon, it.point.lat]); map.setZoom(18); putMarker(it.point.lon, it.point.lat);
+    $('toast').classList.remove('on');
+    openSheet({key: String(it.id), addr: it.address_name || it.full_name || it.name});
+  } catch (err) { toast('Поиск не сработал: проверьте интернет и Geocoder API у ключа', 3500); }
+};
+
+$('loc').onclick = () => {
+  if (!navigator.geolocation) return toast('Геолокация недоступна');
+  toast('Определяю место…', 0);
+  navigator.geolocation.getCurrentPosition(p => {
+    map.setCenter([p.coords.longitude, p.coords.latitude]); map.setZoom(18); putMarker(p.coords.longitude, p.coords.latitude);
+    $('toast').classList.remove('on');
+  }, () => toast('Нет доступа к геолокации', 2500), {enableHighAccuracy: true, timeout: 10000});
+};
+$('exp').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], {type: 'application/json'})); a.download = 'domofon-codes-2gis.json'; a.click(); };
+$('imp').onclick = () => $('file').click();
+$('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return; const rd = new FileReader();
+  rd.onload = () => { try { Object.assign(data, JSON.parse(rd.result)); saveData(); refresh(); toast('Копия загружена'); } catch (x) { toast('Файл не подходит'); } };
+  rd.readAsText(f);
+};
+</script>
+</body>
+</html>
