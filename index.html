@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Домофоны — Нижний Новгород (верхняя часть)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  html,body{height:100%;margin:0;font-family:system-ui,sans-serif}
+  #map{height:100%}
+  #bar{position:absolute;z-index:1000;top:10px;left:50px;right:10px;display:flex;gap:6px;flex-wrap:wrap;pointer-events:none}
+  #bar>*{pointer-events:auto;background:#fff;border:1px solid #ccc;border-radius:8px;padding:7px 10px;font-size:13px;box-shadow:0 1px 4px #0003}
+  #bar button{cursor:pointer}
+  #sf{display:flex;gap:4px;padding:4px;width:100%;max-width:420px}
+  #sf input{flex:1;min-width:0;font-size:16px;padding:6px;border:1px solid #ccc;border-radius:6px}
+  .pop input[type=text]{width:100%;box-sizing:border-box;padding:7px;font-size:16px;margin:4px 0}
+  .pop button{padding:7px 12px;font-size:14px;margin-right:4px}
+  .pop b{display:block;margin-bottom:2px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="bar">
+  <form id="sf"><input id="q" type="search" placeholder="Улица и номер дома, напр. Ларина 5"><button>Найти</button></form>
+  <span id="status">Приблизьте карту (зум 16+), чтобы появились дома</span>
+  <button id="exp">Сохранить копию</button>
+  <button id="imp">Загрузить копию</button>
+  <input type="file" id="file" accept=".json" hidden>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const KEY = 'nn_domofon_codes_v1';
+let data = {};
+try { data = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) {}
+const save = () => localStorage.setItem(KEY, JSON.stringify(data));
+
+// Нагорная часть: примерные границы (Верхне-Волжская наб. — Сормовское шоссе / Мещерское озеро — Нижегородский, Приокский, Советский, Ленинский р-ны)
+const bounds = L.latLngBounds([56.22, 43.82], [56.36, 44.12]);
+const map = L.map('map', {maxBounds: bounds.pad(0.3), minZoom: 12}).setView([56.3175, 43.9965], 16);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '© OpenStreetMap'
+}).addTo(map);
+
+const layer = L.layerGroup().addTo(map);
+const loaded = new Map(); // id -> polygon
+const style = id => data[id] && data[id].code
+  ? {color:'#1a7f37', weight:1, fillColor:'#2ea043', fillOpacity:.55}
+  : {color:'#c2410c', weight:1, fillColor:'#fb923c', fillOpacity:.35};
+
+function esc(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+function addrOf(t){
+  const s = t['addr:street'], h = t['addr:housenumber'];
+  return s ? s + (h ? ', ' + h : '') : (t.name || 'Дом без адреса');
+}
+
+function bind(poly, id, tags){
+  poly.on('click', () => {
+    const d = data[id] || {};
+    const html = `<div class="pop"><b>${esc(addrOf(tags))}</b>
+      <label>Код домофона</label>
+      <input type="text" id="c" inputmode="text" value="${esc(d.code)}" placeholder="например 1234К">
+      <label>Заметка</label>
+      <input type="text" id="n" value="${esc(d.note)}" placeholder="подъезд, этаж…">
+      <button id="s">Сохранить</button><button id="d">Удалить</button></div>`;
+    poly.bindPopup(html).openPopup();
+    setTimeout(() => {
+      document.getElementById('s').onclick = () => {
+        const code = document.getElementById('c').value.trim();
+        const note = document.getElementById('n').value.trim();
+        if (code || note) data[id] = {code, note, addr: addrOf(tags)}; else delete data[id];
+        save(); poly.setStyle(style(id)); poly.closePopup(); poly.unbindPopup();
+      };
+      document.getElementById('d').onclick = () => {
+        delete data[id]; save(); poly.setStyle(style(id)); poly.closePopup(); poly.unbindPopup();
+      };
+    }, 0);
+  });
+}
+
+let busy = false;
+async function loadBuildings(){
+  const st = document.getElementById('status');
+  if (map.getZoom() < 16) { st.textContent = 'Приблизьте карту (зум 16+), чтобы появились дома'; return; }
+  if (busy) return;
+  busy = true; st.textContent = 'Загружаю дома…';
+  const b = map.getBounds();
+  const q = `[out:json][timeout:25];way["building"](${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()});out geom tags;`;
+  try {
+    const r = await fetch('https://overpass-api.de/api/interpreter', {method:'POST', body:'data=' + encodeURIComponent(q)});
+    const j = await r.json();
+    let n = 0;
+    for (const w of j.elements) {
+      if (loaded.has(w.id) || !w.geometry) continue;
+      const poly = L.polygon(w.geometry.map(p => [p.lat, p.lon]), style(w.id));
+      bind(poly, w.id, w.tags || {});
+      poly._tags = w.tags || {}; poly.addTo(layer); loaded.set(w.id, poly); n++;
+    }
+    st.textContent = `Домов на карте: ${loaded.size}. Нажмите на дом, чтобы вписать код`;
+  } catch (e) {
+    st.textContent = 'Не удалось загрузить дома — подвигайте карту ещё раз';
+  }
+  busy = false;
+}
+map.on('moveend', loadBuildings);
+loadBuildings();
+
+// Поиск по улице и номеру дома
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function inside(pt, poly){
+  const r = poly.getLatLngs()[0]; let c = false;
+  for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+    if ((r[i].lat > pt.lat) !== (r[j].lat > pt.lat) &&
+        pt.lng < (r[j].lng - r[i].lng) * (pt.lat - r[i].lat) / (r[j].lat - r[i].lat) + r[i].lng) c = !c;
+  }
+  return c;
+}
+document.getElementById('sf').onsubmit = async e => {
+  e.preventDefault();
+  const q = document.getElementById('q').value.trim();
+  const st = document.getElementById('status');
+  if (!q) return;
+  st.textContent = 'Ищу адрес…';
+  try {
+    const url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=ru&bounded=1&viewbox=43.82,56.36,44.12,56.22&q=' + encodeURIComponent('Нижний Новгород, ' + q);
+    const res = await (await fetch(url)).json();
+    if (!res.length) { st.textContent = 'Адрес не найден. Попробуйте: «Ларина 5» или «ул. Ларина, 5»'; return; }
+    const pt = L.latLng(+res[0].lat, +res[0].lon);
+    map.setView(pt, 18, {animate: false});
+    while (busy) await sleep(200);
+    await loadBuildings();
+    let best = null, bd = Infinity;
+    loaded.forEach(poly => {
+      if (inside(pt, poly)) { best = poly; bd = -1; }
+      else if (bd >= 0) { const d = pt.distanceTo(poly.getBounds().getCenter()); if (d < bd) { bd = d; best = poly; } }
+    });
+    if (best && bd < 60) { best.fire('click'); st.textContent = 'Найдено: ' + res[0].display_name.split(',').slice(0, 2).join(','); }
+    else st.textContent = 'Нашёл место на карте, но дом не определился — нажмите на него вручную';
+  } catch (err) { st.textContent = 'Поиск не сработал, проверьте интернет'; }
+};
+
+// Резервная копия
+document.getElementById('exp').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 1)], {type:'application/json'}));
+  a.download = 'domofon-codes.json'; a.click();
+};
+document.getElementById('imp').onclick = () => document.getElementById('file').click();
+document.getElementById('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    try {
+      Object.assign(data, JSON.parse(rd.result)); save();
+      loaded.forEach((p, id) => p.setStyle(style(id)));
+    } catch (err) { alert('Файл не подходит'); }
+  };
+  rd.readAsText(f);
+};
+</script>
+</body>
+</html>
